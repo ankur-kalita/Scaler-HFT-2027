@@ -1,246 +1,390 @@
-#include <cstdint> 
-#include <vector> 
-#include <string> 
-#include <unordered_map> 
-#include <iostream> 
-#include <set> 
+// main.cpp
+#include <cstdint>
+#include <vector>
+#include <string>
+#include <iostream>
+#include <unordered_map>
+#include <set>
+#include <list>
+#include <algorithm>
 using namespace std;
 
-struct TradeOrder {
-    uint64_t id;
-    bool isBuy;
-    double price;
-    uint64_t qty;
-    uint64_t ts;
+struct Order {
+    uint64_t order_id;     // Unique order identifier
+    bool is_buy;           // true = buy, false = sell
+    double price;          // Limit price
+    uint64_t quantity;     // Remaining quantity
+    uint64_t timestamp_ns; // Order entry timestamp in nanoseconds
 };
 
-struct PriceInfo {
+struct PriceLevel {
     double price;
-    uint64_t totalQty;
+    uint64_t total_quantity;
 };
 
+// Comparators for ordering pointers to Orders.
+// Must impose a strict-weak ordering and break ties with order_id to allow duplicate timestamps.
 struct BuyCompare {
-    bool operator()(const TradeOrder* lhs, const TradeOrder* rhs) const {
-        if (lhs->price != rhs->price)
-            return lhs->price > rhs->price;  // Higher price first
-        return lhs->ts < rhs->ts;           // Earlier timestamp first
+    bool operator()(const Order* lhs, const Order* rhs) const {
+        if (lhs->price != rhs->price) return lhs->price > rhs->price;       // higher price first
+        if (lhs->timestamp_ns != rhs->timestamp_ns) return lhs->timestamp_ns < rhs->timestamp_ns; // FIFO
+        return lhs->order_id < rhs->order_id;                               // unique tie-break
     }
 };
-
 struct SellCompare {
-    bool operator()(const TradeOrder* lhs, const TradeOrder* rhs) const {
-        if (lhs->price != rhs->price)
-            return lhs->price < rhs->price;  // Lower price first
-        return lhs->ts < rhs->ts;
+    bool operator()(const Order* lhs, const Order* rhs) const {
+        if (lhs->price != rhs->price) return lhs->price < rhs->price;       // lower price first
+        if (lhs->timestamp_ns != rhs->timestamp_ns) return lhs->timestamp_ns < rhs->timestamp_ns; // FIFO
+        return lhs->order_id < rhs->order_id;                               // unique tie-break
     }
 };
 
 class OrderBook {
-    unordered_map<uint64_t, TradeOrder> allOrders;
-    set<TradeOrder*, BuyCompare> buySet;
-    set<TradeOrder*, SellCompare> sellSet;
-
 public:
-    // Insert a new order
-    void insertOrder(const TradeOrder& order) {
-        allOrders[order.id] = order;
-        TradeOrder* ptr = &allOrders[order.id];
-        if (order.isBuy)
-            buySet.insert(ptr);
-        else
-            sellSet.insert(ptr);
-        matchOrders();
-    }
+    // Insert a new order into the book
+    void add_order(const Order& order);
 
-    bool removeOrder(uint64_t id) {
-        auto it = allOrders.find(id);
-        if (it == allOrders.end())
-            return false;
+    // Cancel an existing order by its ID
+    bool cancel_order(uint64_t order_id);
 
-        TradeOrder* ord = &it->second;
-        if (ord->isBuy) buySet.erase(ord);
-        else sellSet.erase(ord);
+    // Amend an existing order's price or quantity
+    bool amend_order(uint64_t order_id, double new_price, uint64_t new_quantity);
 
-        allOrders.erase(it);
-        return true;
-    }
+    // Get a snapshot of top N bid and ask levels (aggregated quantities)
+    void get_snapshot(size_t depth, std::vector<PriceLevel>& bids, std::vector<PriceLevel>& asks) const;
 
-    bool modifyOrder(uint64_t id, double newPrice, uint64_t newQty) {
-        auto it = allOrders.find(id);
-        if (it == allOrders.end()) return false;
+    // Print current state of the order book
+    void print_book(size_t depth = 10) const;
 
-        TradeOrder* ord = &it->second;
-        if (ord->isBuy) buySet.erase(ord);
-        else sellSet.erase(ord);
-
-        ord->price = newPrice;
-        ord->qty = newQty;
-
-        if (ord->isBuy) buySet.insert(ord);
-        else sellSet.insert(ord);
-
-        matchOrders();
-        return true;
-    }
-
-    void getSnapshot(size_t depth, vector<PriceInfo>& bids, vector<PriceInfo>& asks) const {
-        bids.clear();
-        asks.clear();
-
-        // --- Aggregate buy side ---
-        double lastPrice = -1;
-        uint64_t accQty = 0;
-        size_t added = 0;
-        for (auto it = buySet.begin(); it != buySet.end() && added < depth; ++it) {
-            const auto* ord = *it;
-            if (ord->price != lastPrice) {
-                if (lastPrice != -1) {
-                    bids.push_back({lastPrice, accQty});
-                    if (++added >= depth) break;
-                }
-                lastPrice = ord->price;
-                accQty = ord->qty;
-            } else accQty += ord->qty;
-        }
-        if (lastPrice != -1 && added < depth)
-            bids.push_back({lastPrice, accQty});
-
-        // --- Aggregate sell side ---
-        lastPrice = -1;
-        accQty = 0;
-        added = 0;
-        for (auto it = sellSet.begin(); it != sellSet.end() && added < depth; ++it) {
-            const auto* ord = *it;
-            if (ord->price != lastPrice) {
-                if (lastPrice != -1) {
-                    asks.push_back({lastPrice, accQty});
-                    if (++added >= depth) break;
-                }
-                lastPrice = ord->price;
-                accQty = ord->qty;
-            } else accQty += ord->qty;
-        }
-        if (lastPrice != -1 && added < depth)
-            asks.push_back({lastPrice, accQty});
-    }
-
-    void printBook(size_t depth = 10) const {
-        cout << "------ Current Order Book ------" << endl;
-        size_t count = 0;
-        auto itBuy = buySet.begin();
-        auto itSell = sellSet.begin();
-
-        while (count < depth && (itBuy != buySet.end() || itSell != sellSet.end())) {
-            if (itBuy != buySet.end()) {
-                const auto* b = *itBuy++;
-                cout << "BUY  ID: " << b->id << " | P: " << b->price << " | Q: " << b->qty << endl;
-                ++count;
-            }
-            if (count >= depth) break;
-
-            if (itSell != sellSet.end()) {
-                const auto* s = *itSell++;
-                cout << "SELL ID: " << s->id << " | P: " << s->price << " | Q: " << s->qty << endl;
-                ++count;
-            }
-        }
-        cout << "-------------------------------\n";
-    }
+    OrderBook() = default;
+    ~OrderBook() = default;
 
 private:
-    void executeTrade(TradeOrder* buy, TradeOrder* sell) {
-        cout << "Trade executed: BUY#" << buy->id << " (" << buy->price << ") <-> "
-             << "SELL#" << sell->id << " (" << sell->price << ")\n";
+    // Stable storage of orders. list nodes have stable addresses.
+    std::list<Order> orders;
 
-        if (buy->qty < sell->qty) {
-            sell->qty -= buy->qty;
-            buySet.erase(buy);
-            allOrders.erase(buy->id);
-        } else if (buy->qty > sell->qty) {
-            buy->qty -= sell->qty;
-            sellSet.erase(sell);
-            allOrders.erase(sell->id);
-        } else {
-            buySet.erase(buy);
-            sellSet.erase(sell);
-            allOrders.erase(buy->id);
-            allOrders.erase(sell->id);
-        }
-    }
+    // Map order_id -> iterator in orders list for O(1) lookup
+    std::unordered_map<uint64_t, std::list<Order>::iterator> order_lookup;
 
-    void matchOrders() {
-        while (!buySet.empty() && !sellSet.empty()) {
-            TradeOrder* bestBuy = *buySet.begin();
-            TradeOrder* bestSell = *sellSet.begin();
+    // Ordered sets of pointers to orders for fast best bid/ask retrieval
+    std::set<Order*, BuyCompare> buy_book;
+    std::set<Order*, SellCompare> sell_book;
 
-            if (bestBuy->price >= bestSell->price)
-                executeTrade(bestBuy, bestSell);
-            else
-                break;
-        }
-    }
+    // Matching engine: simple matching while best bid >= best ask
+    void match();
+
+    // Helpers to safely remove an order from book (set + list + map)
+    void remove_order_by_iterator(const std::list<Order>::iterator& it);
 };
 
+void OrderBook::add_order(const Order& order) {
+    // Insert into list (stable storage)
+    orders.emplace_back(order);
+    auto it = std::prev(orders.end());
+
+    // Register in lookup
+    order_lookup[it->order_id] = it;
+
+    // Insert pointer into appropriate ordered set
+    Order* ptr = &(*it);
+    if (ptr->is_buy) buy_book.insert(ptr);
+    else sell_book.insert(ptr);
+
+    // Optional: try matching
+    match();
+}
+
+bool OrderBook::cancel_order(uint64_t order_id) {
+    auto it_lookup = order_lookup.find(order_id);
+    if (it_lookup == order_lookup.end()) return false;
+
+    auto it = it_lookup->second;
+    Order* ptr = &(*it);
+
+    // Erase from ordered set first
+    if (ptr->is_buy) buy_book.erase(ptr);
+    else sell_book.erase(ptr);
+
+    // Erase from list and lookup
+    orders.erase(it);
+    order_lookup.erase(it_lookup);
+    return true;
+}
+
+bool OrderBook::amend_order(uint64_t order_id, double new_price, uint64_t new_quantity) {
+    auto it_lookup = order_lookup.find(order_id);
+    if (it_lookup == order_lookup.end()) return false;
+
+    auto it = it_lookup->second;
+    Order* ord = &(*it);
+
+    // If price changed, must remove and re-insert in the ordered set to maintain correct ordering.
+    if (ord->price != new_price) {
+        if (ord->is_buy) buy_book.erase(ord);
+        else sell_book.erase(ord);
+
+        ord->price = new_price;
+        ord->quantity = new_quantity;
+
+        if (ord->is_buy) buy_book.insert(ord);
+        else sell_book.insert(ord);
+
+        // Price changed — matching might now be possible
+        match();
+        return true;
+    }
+
+    // If only quantity changed, update in place
+    ord->quantity = new_quantity;
+    if (ord->quantity == 0) {
+        // If quantity becomes 0, remove the order completely
+        if (ord->is_buy) buy_book.erase(ord);
+        else sell_book.erase(ord);
+
+        orders.erase(it);
+        order_lookup.erase(it_lookup);
+    }
+    return true;
+}
+
+void OrderBook::get_snapshot(size_t depth, std::vector<PriceLevel>& bids, std::vector<PriceLevel>& asks) const {
+    bids.clear();
+    asks.clear();
+
+    // Aggregate bids (buy_book is ordered highest price first)
+    double current_price = numeric_limits<double>::quiet_NaN();
+    uint64_t total_qty = 0;
+    size_t added_levels = 0;
+
+    for (auto it = buy_book.begin(); it != buy_book.end() && added_levels < depth; ++it) {
+        const Order* o = *it;
+        if (!(o->price == current_price)) { // handles NaN initial
+            if (!std::isnan(current_price)) {
+                bids.push_back({current_price, total_qty});
+                ++added_levels;
+                if (added_levels >= depth) break;
+            }
+            current_price = o->price;
+            total_qty = o->quantity;
+        } else {
+            total_qty += o->quantity;
+        }
+    }
+    if (!std::isnan(current_price) && added_levels < depth) {
+        bids.push_back({current_price, total_qty});
+    }
+
+    // Aggregate asks (sell_book is ordered lowest price first)
+    current_price = numeric_limits<double>::quiet_NaN();
+    total_qty = 0;
+    added_levels = 0;
+    for (auto it = sell_book.begin(); it != sell_book.end() && added_levels < depth; ++it) {
+        const Order* o = *it;
+        if (!(o->price == current_price)) {
+            if (!std::isnan(current_price)) {
+                asks.push_back({current_price, total_qty});
+                ++added_levels;
+                if (added_levels >= depth) break;
+            }
+            current_price = o->price;
+            total_qty = o->quantity;
+        } else {
+            total_qty += o->quantity;
+        }
+    }
+    if (!std::isnan(current_price) && added_levels < depth) {
+        asks.push_back({current_price, total_qty});
+    }
+}
+
+void OrderBook::print_book(size_t depth) const {
+    cout << "======================================" << endl;
+    cout << "Order Book (interleaved up to " << depth << " entries):" << endl;
+
+    auto it_buy = buy_book.begin();
+    auto it_sell = sell_book.begin();
+    size_t count = 0;
+
+    while (count < depth && (it_buy != buy_book.end() || it_sell != sell_book.end())) {
+        if (it_buy != buy_book.end()) {
+            const Order* o = *it_buy;
+            cout << "[BID]  ID: " << o->order_id << " | P: " << o->price << " | Q: " << o->quantity << " | ts: " << o->timestamp_ns << "\n";
+            ++it_buy;
+            ++count;
+            if (count >= depth) break;
+        }
+        if (it_sell != sell_book.end()) {
+            const Order* o = *it_sell;
+            cout << "[ASK]  ID: " << o->order_id << " | P: " << o->price << " | Q: " << o->quantity << " | ts: " << o->timestamp_ns << "\n";
+            ++it_sell;
+            ++count;
+        }
+    }
+    cout << "======================================" << endl;
+}
+
+void OrderBook::remove_order_by_iterator(const std::list<Order>::iterator& it) {
+    Order* ptr = &(*it);
+    if (ptr->is_buy) buy_book.erase(ptr);
+    else sell_book.erase(ptr);
+    order_lookup.erase(ptr->order_id);
+    orders.erase(it);
+}
+
+void OrderBook::match() {
+    // Simple continuous matching while best bid >= best ask
+    while (!buy_book.empty() && !sell_book.empty()) {
+        Order* best_buy = *buy_book.begin();
+        Order* best_sell = *sell_book.begin();
+
+        if (best_buy->price < best_sell->price) break; // no match possible
+
+        // execution qty is min of both
+        uint64_t trade_qty = std::min(best_buy->quantity, best_sell->quantity);
+        double trade_price = best_sell->timestamp_ns <= best_buy->timestamp_ns ? best_sell->price : best_buy->price;
+        // (we can choose trade price policy; here we show both sides' prices for clarity)
+        cout << "TRADE: BuyID=" << best_buy->order_id << " SellID=" << best_sell->order_id
+             << " Qty=" << trade_qty << " BidP=" << best_buy->price << " AskP=" << best_sell->price << endl;
+
+        // Deduct quantities
+        best_buy->quantity -= trade_qty;
+        best_sell->quantity -= trade_qty;
+
+        // Remove any orders with quantity == 0
+        if (best_buy->quantity == 0) {
+            // find iterator in map to erase list node safely
+            auto itb = order_lookup.find(best_buy->order_id);
+            if (itb != order_lookup.end()) {
+                auto list_it = itb->second;
+                // Erase from sets & list & map
+                buy_book.erase(best_buy);            // erase pointer from set
+                order_lookup.erase(itb);             // remove lookup
+                orders.erase(list_it);               // remove list node
+            } else {
+                // Shouldn't happen; safety guard
+                buy_book.erase(best_buy);
+            }
+        }
+
+        if (best_sell->quantity == 0) {
+            auto its = order_lookup.find(best_sell->order_id);
+            if (its != order_lookup.end()) {
+                auto list_it = its->second;
+                sell_book.erase(best_sell);
+                order_lookup.erase(its);
+                orders.erase(list_it);
+            } else {
+                sell_book.erase(best_sell);
+            }
+        }
+
+        // If one side partially filled, its pointer remains valid and still in the set.
+        // continue matching while condition holds
+    }
+}
+
+// ---------------------------
+// Demo / Tests (main)
+// ---------------------------
 int main() {
     OrderBook ob;
 
-    cout << "\n=== ORDER BOOK DEMO ===\n\n";
+    cout << "=== Testing Order Book Implementation ===" << endl << endl;
 
-    // Buy orders
-    ob.insertOrder({1001, true, 50.25, 100, 1000000000});
-    ob.insertOrder({1011, true, 50.25, 200, 1000000010});
-    ob.insertOrder({1002, true, 50.50, 200, 1000000001});
-    ob.insertOrder({1003, true, 50.00, 150, 1000000002});
+    // Test 1: Add some buy orders
+    cout << "1. Adding buy orders:" << endl;
+    Order buy1 = {1001, true, 50.25, 100, 1000000000};
+    Order buy4 = {1011, true, 50.25, 200, 1000000010};
+    Order buy2 = {1002, true, 50.50, 200, 1000000001};
+    Order buy3 = {1003, true, 50.00, 150, 1000000002};
 
-    cout << "After adding buy orders:\n";
-    ob.printBook(5);
+    ob.add_order(buy1);
+    ob.add_order(buy2);
+    ob.add_order(buy3);
+    ob.add_order(buy4);
 
-    // Sell orders
-    ob.insertOrder({2001, false, 51.00, 80, 1000000003});
-    ob.insertOrder({2002, false, 51.25, 120, 1000000004});
-    ob.insertOrder({2003, false, 50.75, 90, 1000000005});
-    ob.insertOrder({2004, false, 50.95, 190, 1000000015});
+    cout << "==========Book state after adding buy orders:==========" << endl;
+    ob.print_book(5);
+    cout << endl;
 
-    cout << "After adding sell orders:\n";
-    ob.printBook(10);
+    // Test 2: Add some sell orders (no matching yet)
+    cout << "2. Adding sell orders (higher prices, no matches):" << endl;
+    Order sell1 = {2001, false, 51.00, 80, 1000000003};
+    Order sell2 = {2002, false, 51.25, 120, 1000000004};
+    Order sell3 = {2003, false, 50.75, 90, 1000000005};
+    Order sell4 = {2004, false, 50.95, 190, 1000000015};
 
-    // Snapshot
-    vector<PriceInfo> bids, asks;
-    ob.getSnapshot(4, bids, asks);
-    cout << "\nTop 4 Bid Levels:\n";
-    for (auto& b : bids)
-        cout << "P: " << b.price << " | Qty: " << b.totalQty << endl;
+    ob.add_order(sell1);
+    ob.add_order(sell2);
+    ob.add_order(sell3);
+    ob.add_order(sell4);
 
-    cout << "\nTop 4 Ask Levels:\n";
-    for (auto& a : asks)
-        cout << "P: " << a.price << " | Qty: " << a.totalQty << endl;
+    cout << "==========Book state after adding sell orders:==========" << endl;
+    ob.print_book(10);
+    cout << endl;
 
-    // Matching sell
-    ob.insertOrder({2005, false, 50.25, 50, 1000000006});
-    cout << "\nAfter adding matching sell:\n";
-    ob.printBook(10);
+    // Test 3: Snapshot
+    cout << "3. Testing snapshot functionality:" << endl;
+    vector<PriceLevel> bids, asks;
+    ob.get_snapshot(4, bids, asks);
 
-    // Cancel orders
-    cout << "\nCancelling order 1001...\n";
-    cout << (ob.removeOrder(1001) ? "Cancelled successfully" : "Cancel failed") << endl;
+    cout << "==========Top 4 Aggregated Bids:==========" << endl;
+    for (const auto& b : bids) {
+        cout << "  Price: " << b.price << ", Quantity: " << b.total_quantity << endl;
+    }
+    cout << "==========Top 4 Aggregated Asks:==========" << endl;
+    for (const auto& a : asks) {
+        cout << "  Price: " << a.price << ", Quantity: " << a.total_quantity << endl;
+    }
+    cout << endl;
 
-    cout << "Cancelling non-existing order 9999...\n";
-    cout << (ob.removeOrder(9999) ? "Cancelled successfully" : "Cancel failed") << endl;
+    // Test 4: Add a sell order that will match
+    cout << "4. Adding a sell order (id: 2005, qty: 50, price: 50.25) that should match:" << endl;
+    Order sell_match = {2005, false, 50.25, 50, 1000000006};
+    ob.add_order(sell_match);
 
-    cout << "\nAfter cancellation:\n";
-    ob.printBook(10);
+    cout << "==========Book state after matching:==========" << endl;
+    ob.print_book(10);
+    cout << endl;
 
-    // Amend
-    cout << "\nAmending order 1002 (new price: 49.75, qty: 300)\n";
-    cout << (ob.modifyOrder(1002, 49.75, 300) ? "Amended successfully" : "Amend failed") << endl;
-    ob.printBook(10);
+    // Test 5: Cancel
+    cout << "5. Testing order cancellation:" << endl;
+    cout << "Canceling order ID 1001..." << endl;
+    bool cancelled = ob.cancel_order(1001);
+    cout << "Cancellation " << (cancelled ? "successful" : "failed") << endl;
 
-    // Aggressive orders
-    ob.insertOrder({3001, true, 52.00, 200, 1000000007});
-    ob.insertOrder({3002, false, 49.00, 100, 1000000008});
+    cout << "Trying to cancel non-existent order 9999..." << endl;
+    cancelled = ob.cancel_order(9999);
+    cout << "Cancellation " << (cancelled ? "successful" : "failed") << endl;
 
-    cout << "\nFinal order book:\n";
-    ob.printBook(10);
-    cout << "\n=== END ===\n";
+    cout << "==========Book state after cancellation:==========" << endl;
+    ob.print_book(10);
+    cout << endl;
+
+    // Test 6: Amend
+    cout << "6. Testing order amendment:" << endl;
+    cout << "Amending order (for ID 1002) - changing price to 49.75 and quantity to 300..." << endl;
+    bool amended = ob.amend_order(1002, 49.75, 300);
+    cout << "Amendment " << (amended ? "successful" : "failed") << endl;
+
+    cout << "==========Book state after amendment:==========" << endl;
+    ob.print_book(10);
+    cout << endl;
+
+    // Test 7: Aggressive orders to trigger matches
+    cout << "7. Adding aggressive orders to trigger matches:" << endl;
+    Order aggressive_buy = {3001, true, 52.00, 200, 1000000007};
+    Order aggressive_sell = {3002, false, 49.00, 100, 1000000008};
+
+    cout << "Adding aggressive buy order (price: 52.00)..." << endl;
+    ob.add_order(aggressive_buy);
+
+    cout << "Adding aggressive sell order (price: 49.00)..." << endl;
+    ob.add_order(aggressive_sell);
+
+    cout << "==========Final book state:==========" << endl;
+    ob.print_book(10);
+
+    cout << endl << "=== Order Book Testing Complete ===" << endl;
     return 0;
 }
