@@ -1,0 +1,131 @@
+# =============================================================================
+# Docker Compose for HFT Market Data System
+# =============================================================================
+#
+# This file orchestrates all three processes:
+# - publisher: Generates and distributes market data (TCP + SHM)
+# - shm_consumer: Reads from shared memory
+# - tcp_consumer: Reads from TCP socket
+#
+# Usage:
+#   docker-compose up --build          # Build and run all services
+#   docker-compose up publisher        # Run only publisher
+#   docker-compose logs -f             # Follow logs
+#   docker-compose down                # Stop and remove containers
+#
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ===========================================================================
+  # Process A: Market Data Publisher
+  # ===========================================================================
+  publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hft-publisher
+    command: ["./publisher"]
+    ports:
+      - "9876:9876"
+    # Shared memory requires IPC_LOCK capability and shared /dev/shm
+    cap_add:
+      - IPC_LOCK
+      - SYS_NICE
+    volumes:
+      - shm_data:/dev/shm
+    # Performance optimizations
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    # CPU pinning (optional, requires cpuset support)
+    # cpuset: "0"
+    networks:
+      - hft_network
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Process B: Shared Memory Consumer
+  # ===========================================================================
+  shm_consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hft-shm-consumer
+    command: ["./shm_consumer"]
+    cap_add:
+      - IPC_LOCK
+      - SYS_NICE
+    volumes:
+      - shm_data:/dev/shm
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    depends_on:
+      - publisher
+    # Wait for publisher to create shared memory
+    # In production, use proper health checks
+    networks:
+      - hft_network
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Process C: TCP Consumer
+  # ===========================================================================
+  tcp_consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hft-tcp-consumer
+    command: ["./tcp_consumer"]
+    cap_add:
+      - SYS_NICE
+    depends_on:
+      - publisher
+    networks:
+      - hft_network
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Benchmark Tool (run manually)
+  # ===========================================================================
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hft-benchmark
+    command: ["./benchmark"]
+    cap_add:
+      - SYS_NICE
+    profiles:
+      - benchmark  # Only runs with: docker-compose --profile benchmark up benchmark
+    networks:
+      - hft_network
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  # Shared memory volume (tmpfs backed)
+  shm_data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=128m,mode=1777
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  hft_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
