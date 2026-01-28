@@ -34,7 +34,6 @@ public:
     SPSCRingBuffer& operator=(SPSCRingBuffer&&) = delete;
     
     ~SPSCRingBuffer() {
-        // Call destructors for any remaining elements
         while (!empty()) {
             T temp;
             pop(temp);

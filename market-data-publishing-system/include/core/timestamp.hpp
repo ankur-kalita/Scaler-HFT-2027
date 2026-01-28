@@ -16,7 +16,6 @@ inline uint64_t get_timestamp_ns() noexcept {
 inline uint64_t get_monotonic_ns() noexcept {
     struct timespec ts;
 #ifdef __APPLE__
-    // macOS doesn't have CLOCK_MONOTONIC_RAW
     clock_gettime(CLOCK_MONOTONIC, &ts);
 #else
     clock_gettime(CLOCK_MONOTONIC_RAW, &ts);

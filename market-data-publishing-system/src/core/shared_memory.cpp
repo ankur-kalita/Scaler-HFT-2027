@@ -1,17 +1,10 @@
-/**
- * @file shared_memory.cpp
- * @brief Implementation of POSIX shared memory management
- */
-
 #include "core/shared_memory.hpp"
 #include <fmt/core.h>
 #include <fmt/format.h>
 
 #include <cerrno>
 #include <cstring>
-#include <new>  // for placement new
-
-// POSIX includes
+#include <new>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -27,10 +20,8 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
     , ring_buffer_(nullptr)
     , is_locked_(false) {
     
-    // Calculate required size (ring buffer + metadata alignment)
     shm_size_ = sizeof(SharedRingBuffer);
     
-    // Round up to page size for optimal mmap
     long page_size = sysconf(_SC_PAGESIZE);
     if (page_size > 0) {
         shm_size_ = ((shm_size_ + page_size - 1) / page_size) * page_size;
@@ -40,14 +31,8 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
                shm_size_, shm_size_ / 1024);
     
     if (create_new) {
-        // =====================================================================
-        // PRODUCER: Create new shared memory segment
-        // =====================================================================
-        
-        // First, try to unlink any existing segment with same name
         shm_unlink(shm_name_);
         
-        // Create shared memory object
         shm_fd_ = shm_open(shm_name_, O_CREAT | O_RDWR | O_EXCL, config::SHM_MODE);
         if (shm_fd_ == -1) {
             fmt::print(stderr, "Failed to create shared memory '{}': {}\n",
@@ -55,7 +40,6 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
             return;
         }
         
-        // Set the size
         if (ftruncate(shm_fd_, static_cast<off_t>(shm_size_)) == -1) {
             fmt::print(stderr, "Failed to set shared memory size: {}\n",
                        strerror(errno));
@@ -65,11 +49,9 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
             return;
         }
         
-        // Map the memory
-        // MAP_POPULATE pre-faults pages (Linux only, ignored on other platforms)
         int mmap_flags = MAP_SHARED;
 #ifdef __linux__
-        mmap_flags |= MAP_POPULATE;  // Pre-fault pages to avoid page faults later
+        mmap_flags |= MAP_POPULATE;
 #endif
         
         mapped_addr_ = mmap(nullptr, shm_size_, 
@@ -87,18 +69,13 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
             return;
         }
         
-        // Initialize ring buffer using placement new
         ring_buffer_ = new (mapped_addr_) SharedRingBuffer();
         
         fmt::print("Created shared memory '{}' at address {:p}\n",
                    shm_name_, mapped_addr_);
         
     } else {
-        // =====================================================================
-        // CONSUMER: Attach to existing shared memory segment
-        // =====================================================================
         
-        // Open existing shared memory
         shm_fd_ = shm_open(shm_name_, O_RDWR, 0);
         if (shm_fd_ == -1) {
             fmt::print(stderr, "Failed to open shared memory '{}': {}\n"
@@ -107,7 +84,6 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
             return;
         }
         
-        // Get the actual size
         struct stat sb;
         if (fstat(shm_fd_, &sb) == -1) {
             fmt::print(stderr, "Failed to get shared memory size: {}\n",
@@ -118,7 +94,6 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
         }
         shm_size_ = static_cast<std::size_t>(sb.st_size);
         
-        // Map the memory
         mapped_addr_ = mmap(nullptr, shm_size_,
                            PROT_READ | PROT_WRITE,
                            MAP_SHARED,
@@ -133,7 +108,6 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
             return;
         }
         
-        // Cast to ring buffer (no construction, just reinterpret existing memory)
         ring_buffer_ = reinterpret_cast<SharedRingBuffer*>(mapped_addr_);
         
         fmt::print("Attached to shared memory '{}' at address {:p}\n",
@@ -143,12 +117,10 @@ SharedMemory::SharedMemory(bool create_new, const char* name)
 
 SharedMemory::~SharedMemory() {
     if (mapped_addr_ != nullptr && mapped_addr_ != MAP_FAILED) {
-        // Unlock if locked
         if (is_locked_) {
             munlock(mapped_addr_, shm_size_);
         }
         
-        // Unmap
         if (munmap(mapped_addr_, shm_size_) == -1) {
             fmt::print(stderr, "Warning: Failed to unmap shared memory: {}\n",
                        strerror(errno));
@@ -161,9 +133,6 @@ SharedMemory::~SharedMemory() {
         close(shm_fd_);
         shm_fd_ = -1;
     }
-    
-    // Only unlink if we're the creator and explicitly requested
-    // (usually want to keep it alive for consumers)
 }
 
 void SharedMemory::unlink() {
@@ -191,8 +160,6 @@ bool SharedMemory::lock_memory() {
         return false;
     }
     
-    // Lock pages in memory to prevent swapping
-    // This eliminates swap-related latency spikes
     if (mlock(mapped_addr_, shm_size_) == -1) {
         fmt::print(stderr, "Failed to lock shared memory: {} "
                    "(try increasing RLIMIT_MEMLOCK or run as root)\n",
@@ -211,19 +178,16 @@ void SharedMemory::prefault_pages() {
         return;
     }
     
-    // Touch every page to pre-fault them
-    // This ensures all pages are in physical memory before we start
     volatile char* ptr = static_cast<volatile char*>(mapped_addr_);
     long page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) {
-        page_size = 4096;  // Default page size
+        page_size = 4096;
     }
     
     for (std::size_t i = 0; i < shm_size_; i += static_cast<std::size_t>(page_size)) {
-        // Read-write to force page allocation
         char temp = ptr[i];
         ptr[i] = temp;
-        (void)temp;  // Suppress unused warning
+        (void)temp;
     }
     
     fmt::print("Pre-faulted {} pages\n", shm_size_ / page_size);

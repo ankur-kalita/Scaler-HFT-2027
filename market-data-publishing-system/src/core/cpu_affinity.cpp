@@ -1,8 +1,3 @@
-/**
- * @file cpu_affinity.cpp
- * @brief Implementation of CPU affinity and NUMA utilities
- */
-
 #include "core/cpu_affinity.hpp"
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -10,7 +5,6 @@
 #include <thread>
 #include <cstring>
 
-// Platform-specific includes
 #ifdef __linux__
     #include <sched.h>
     #include <pthread.h>
@@ -42,7 +36,6 @@ bool set_thread_affinity(int cpu_core) {
     return true;
     
 #elif defined(__APPLE__)
-    // macOS doesn't support hard CPU affinity, but we can use thread affinity hints
     thread_affinity_policy_data_t policy = { cpu_core };
     kern_return_t result = thread_policy_set(
         pthread_mach_thread_np(pthread_self()),
@@ -91,7 +84,6 @@ int get_thread_affinity() {
         return -1;
     }
     
-    // Find first set CPU
     for (int i = 0; i < CPU_SETSIZE; ++i) {
         if (CPU_ISSET(i, &cpuset)) {
             return i;
@@ -120,7 +112,6 @@ bool set_realtime_priority(int priority) {
     return true;
     
 #elif defined(__APPLE__)
-    // macOS uses different priority mechanism
     struct sched_param param;
     param.sched_priority = priority;
     
@@ -146,7 +137,6 @@ int get_current_cpu() {
 #ifdef __linux__
     return sched_getcpu();
 #elif defined(__APPLE__)
-    // macOS doesn't have sched_getcpu, return -1
     return -1;
 #else
     return -1;
@@ -155,7 +145,6 @@ int get_current_cpu() {
 
 int get_numa_node(int cpu_core) {
 #ifdef __linux__
-    // Read from /sys/devices/system/cpu/cpu{N}/node{X}
     char path[128];
     std::snprintf(path, sizeof(path), 
                   "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", 
@@ -163,7 +152,7 @@ int get_numa_node(int cpu_core) {
     
     FILE* f = fopen(path, "r");
     if (!f) {
-        return 0;  // Default to node 0 if can't determine
+        return 0;
     }
     
     int node = 0;
@@ -179,8 +168,6 @@ int get_numa_node(int cpu_core) {
 }
 
 void* allocate_numa(std::size_t size, int numa_node) {
-    // For simplicity, we use regular allocation here
-    // In production, you'd use libnuma: numa_alloc_onnode()
     (void)numa_node;
     void* ptr = aligned_alloc(config::CACHE_LINE_SIZE, size);
     return ptr;
@@ -218,11 +205,9 @@ bool disable_frequency_scaling(int cpu_core) {
 
 void print_cpu_topology() {
     int cpu_count = get_cpu_count();
-    fmt::print("=== CPU Topology ===\n");
     fmt::print("CPU cores: {}\n", cpu_count);
     
 #ifdef __linux__
-    fmt::print("NUMA nodes:\n");
     for (int i = 0; i < cpu_count; ++i) {
         int node = get_numa_node(i);
         fmt::print("  Core {}: NUMA node {}\n", i, node);
@@ -230,10 +215,8 @@ void print_cpu_topology() {
 #endif
     
     fmt::print("Cache line size: {} bytes\n", config::CACHE_LINE_SIZE);
-    fmt::print("====================\n");
 }
 
-// ScopedAffinity implementation
 ScopedAffinity::ScopedAffinity(int cpu_core)
     : original_affinity_(get_thread_affinity())
     , was_set_(false) {

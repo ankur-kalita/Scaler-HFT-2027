@@ -1,17 +1,3 @@
-/**
- * @file main.cpp
- * @brief Process C - Market Data Consumer over TCP
- * 
- * This consumer connects to the TCP server and receives market data
- * via JSON messages over TCP loopback socket.
- * 
- * PERFORMANCE CHARACTERISTICS:
- * - TCP_NODELAY for immediate reception
- * - Large receive buffers
- * - Nanosecond timestamp logging
- * - CPU affinity for separate core
- */
-
 #include "core/config.hpp"
 #include "core/timestamp.hpp"
 #include "core/cpu_affinity.hpp"
@@ -46,16 +32,10 @@ void print_banner() {
     fmt::print("\n");
 }
 
-/**
- * @brief Parse JSON market data (simple hand-rolled parser for speed).
- * 
- * Expected format: {"instrument":"SYM","bid":X.XX,"ask":X.XX,"timestamp_ns":N}
- */
 bool parse_json(const char* json, hft::MarketData& data) {
-    // Find instrument
     const char* inst_start = std::strstr(json, "\"instrument\":\"");
     if (!inst_start) return false;
-    inst_start += 14;  // Skip past "instrument":"
+    inst_start += 14;
     
     const char* inst_end = std::strchr(inst_start, '"');
     if (!inst_end) return false;
@@ -65,19 +45,16 @@ bool parse_json(const char* json, hft::MarketData& data) {
     std::memset(data.instrument, 0, sizeof(data.instrument));
     std::memcpy(data.instrument, inst_start, inst_len);
     
-    // Find bid
     const char* bid_start = std::strstr(json, "\"bid\":");
     if (!bid_start) return false;
     bid_start += 6;
     data.bid = std::strtod(bid_start, nullptr);
     
-    // Find ask
     const char* ask_start = std::strstr(json, "\"ask\":");
     if (!ask_start) return false;
     ask_start += 6;
     data.ask = std::strtod(ask_start, nullptr);
     
-    // Find timestamp_ns
     const char* ts_start = std::strstr(json, "\"timestamp_ns\":");
     if (!ts_start) return false;
     ts_start += 15;
@@ -86,9 +63,6 @@ bool parse_json(const char* json, hft::MarketData& data) {
     return true;
 }
 
-/**
- * @brief Log market data with formatted timestamp.
- */
 void log_market_data(const hft::MarketData& data, int64_t latency_ns) {
     char ts_buffer[32];
     hft::format_timestamp(data.timestamp_ns, ts_buffer);
@@ -101,7 +75,7 @@ void log_market_data(const hft::MarketData& data, int64_t latency_ns) {
                latency_ns);
 }
 
-}  // anonymous namespace
+}
 
 int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
@@ -109,9 +83,6 @@ int main(int argc, char* argv[]) {
     
     print_banner();
     
-    // =========================================================================
-    // STEP 1: CPU Affinity
-    // =========================================================================
     fmt::print("=== CPU Configuration ===\n");
     
     if (hft::set_thread_affinity(hft::config::TCP_CONSUMER_CPU_CORE)) {
@@ -121,9 +92,6 @@ int main(int argc, char* argv[]) {
     
     hft::set_realtime_priority(50);
     
-    // =========================================================================
-    // STEP 2: Connect to TCP Server
-    // =========================================================================
     fmt::print("\n=== TCP Connection Setup ===\n");
     
     boost::asio::io_context io_context;
@@ -139,25 +107,20 @@ int main(int argc, char* argv[]) {
         
         socket.connect(endpoint);
         
-        // Apply socket optimizations
         boost::system::error_code ec;
         
-        // TCP_NODELAY
         socket.set_option(boost::asio::ip::tcp::no_delay(true), ec);
         if (ec) {
             fmt::print(stderr, "Warning: Failed to set TCP_NODELAY\n");
         }
         
-        // Receive buffer size
         socket.set_option(boost::asio::socket_base::receive_buffer_size(
             static_cast<int>(hft::config::TCP_RECV_BUFFER_SIZE)), ec);
         
-        // Send buffer size
         socket.set_option(boost::asio::socket_base::send_buffer_size(
             static_cast<int>(hft::config::TCP_SEND_BUFFER_SIZE)), ec);
         
 #ifdef __linux__
-        // TCP_QUICKACK
         int quickack = 1;
         setsockopt(socket.native_handle(), IPPROTO_TCP, TCP_QUICKACK,
                    &quickack, sizeof(quickack));
@@ -171,9 +134,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // =========================================================================
-    // STEP 3: Main Consumer Loop
-    // =========================================================================
     fmt::print("\n=== Starting Consumer ===\n");
     fmt::print("Press Ctrl+C to stop\n\n");
     
@@ -184,12 +144,10 @@ int main(int argc, char* argv[]) {
     int64_t max_latency_ns = 0;
     uint64_t parse_errors = 0;
     
-    // Read buffer
     char read_buffer[hft::config::TCP_READ_BUFFER_SIZE];
     std::string line_buffer;
     line_buffer.reserve(512);
     
-    // Statistics tracking
     uint64_t last_stats_time = hft::get_monotonic_ns();
     constexpr uint64_t STATS_INTERVAL_NS = 1000000000ULL;
     uint64_t messages_this_second = 0;
@@ -199,7 +157,6 @@ int main(int argc, char* argv[]) {
     while (g_running.load(std::memory_order_acquire)) {
         boost::system::error_code ec;
         
-        // Read data from socket (non-blocking would be ideal, but sync is simpler)
         std::size_t bytes_read = socket.read_some(
             boost::asio::buffer(read_buffer, sizeof(read_buffer) - 1), ec);
         
@@ -215,13 +172,10 @@ int main(int argc, char* argv[]) {
             continue;
         }
         
-        // Record receive timestamp immediately for accurate latency
         uint64_t receive_time = hft::get_timestamp_ns();
         
-        // Null-terminate and process
         read_buffer[bytes_read] = '\0';
         
-        // Append to line buffer and process complete lines
         line_buffer.append(read_buffer, bytes_read);
         
         std::size_t pos = 0;
@@ -231,9 +185,7 @@ int main(int argc, char* argv[]) {
             std::string json_line = line_buffer.substr(pos, newline_pos - pos);
             pos = newline_pos + 1;
             
-            // Parse JSON
             if (parse_json(json_line.c_str(), data)) {
-                // Calculate latency
                 int64_t latency = hft::calculate_latency_ns(data.timestamp_ns, receive_time);
                 
                 ++messages_received;
@@ -243,7 +195,6 @@ int main(int argc, char* argv[]) {
                 if (latency < min_latency_ns) min_latency_ns = latency;
                 if (latency > max_latency_ns) max_latency_ns = latency;
                 
-                // Log occasionally
                 if (messages_received % 10000 == 0 || messages_received <= 10) {
                     log_market_data(data, latency);
                 }
@@ -252,12 +203,10 @@ int main(int argc, char* argv[]) {
             }
         }
         
-        // Keep unprocessed data
         if (pos > 0) {
             line_buffer.erase(0, pos);
         }
         
-        // Print statistics periodically
         uint64_t now = hft::get_monotonic_ns();
         if (now - last_stats_time >= STATS_INTERVAL_NS) {
             double avg_latency = messages_received > 0 
@@ -278,9 +227,6 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // =========================================================================
-    // FINAL STATISTICS
-    // =========================================================================
     fmt::print("\n=== Final Statistics ===\n");
     
     auto end_time = std::chrono::steady_clock::now();
@@ -308,7 +254,6 @@ int main(int argc, char* argv[]) {
     fmt::print("  Maximum: {} ns ({:.2f} us)\n", 
                max_latency_ns, static_cast<double>(max_latency_ns) / 1000.0);
     
-    // Close socket
     boost::system::error_code ec;
     socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
     socket.close(ec);
